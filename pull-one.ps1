@@ -1,0 +1,6 @@
+$p = 'C:\Users\ajest\Desktop\Dummy Drop\shot-size.jpg'
+$b = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+$chunk = 20000
+$parts = [Math]::Ceiling($b.Length / $chunk)
+for ($i = 0; $i -lt $parts; $i++) { $len = [Math]::Min($chunk, $b.Length - $i * $chunk); [IO.File]::WriteAllText("$p.b64.$i", $b.Substring($i * $chunk, $len)) }
+Write-Output "parts=$parts bytes=$((Get-Item $p).Length)"

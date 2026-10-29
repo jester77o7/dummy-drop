@@ -1,0 +1,719 @@
+// Dummy Drop - Stage 2 RAGDOLL (hand-coded by Muse, foreman)
+// Matter.js fixed timestep, custom canvas drawing (not Matter Render).
+// Ragdoll per research notes section 1: official part sizes, joint stiffness 0.6,
+// legs link 0.01, ONE shared negative collision group per dummy.
+(function(){
+'use strict';
+window.__errors=[];
+window.addEventListener('error',function(e){window.__errors.push(String(e.message||e.error||'unknown'));});
+
+var M=Matter;
+var W=1280,H=720,GROUND_Y=680;
+var ANCHOR={x:180,y:540};
+var MAX_DRAG=140;
+
+var engine=M.Engine.create({enableSleeping:true,positionIterations:6,velocityIterations:4,constraintIterations:2});
+// F2 note (self critique #1): iterations 10/6 were TRIED on 2026-10-28
+// 23:40 CT and REVERTED the same night: they cut stack sag (L3 cap settle
+// 10.26 -> 7.23 px) but the stiffer solver broke the collapse/crush gameplay
+// the levels were tuned under (test-stage6 fell to 11/13: L1 and L2 became
+// unbeatable in 5 dummies). Sag is fixed by build-time pre-settling in
+// buildTower instead, which changes no in-play physics.
+engine.gravity.y=1;
+var world=engine.world;
+
+var ground=M.Bodies.rectangle(W/2,GROUND_Y+20,W+200,40,{isStatic:true,friction:1,frictionStatic:10,restitution:0,label:'ground'});
+var wallL=M.Bodies.rectangle(-20,H/2,40,H*2,{isStatic:true,label:'wall'});
+var wallR=M.Bodies.rectangle(W+20,H/2,40,H*2,{isStatic:true,label:'wall'});
+var ceil=M.Bodies.rectangle(W/2,-40,W+200,40,{isStatic:true,label:'wall'});
+M.Composite.add(world,[ground,wallL,wallR,ceil]);
+
+// --- Materials and breakage (Stage 3, Muse hand-sets the rules) ---
+// Numbers from the physics research notes section 3: damage = relative speed at
+// collisionStart once it passes the material threshold; health pools glass 3,
+// wood 10, stone 40, pumpkin 4. Cracked look at half health (drawing only).
+var MATERIALS={
+  glass:{density:0.0008,threshold:2.5,health:3,color:'#bfe6ef'},
+  wood:{density:0.001,threshold:4,health:10,color:'#9a6a35'},
+  stone:{density:0.002,threshold:9,health:40,color:'#7d7d7d'},
+  pumpkin:{density:0.0008,threshold:4,health:4,color:'#e07b1f'}
+};
+var scoreState={score:0,blocksBroken:0,pumpkinsSquashed:0};
+// --- Stage 7 JUICE (H3, critique #3): hit-stop + floating score popups ---
+// Drawing/timing only: hit-stop pauses physics steps for ~60 ms (the frame
+// loop skips stepping and clears the accumulator, so no burst follows);
+// popups are pure canvas text. No physics values change.
+var juice={hitStopUntil:0,hitStops:0,popups:[]};
+function triggerHitStop(){juice.hitStops++;var u=performance.now()+60;if(u>juice.hitStopUntil)juice.hitStopUntil=u;}
+function addPopup(x,y,text){juice.popups.push({x:x,y:y,text:text,born:performance.now()});if(juice.popups.length>20)juice.popups.shift();}
+function juiceInfo(){var now=performance.now();return {hitStops:juice.hitStops,hitStopActive:now<juice.hitStopUntil,popups:juice.popups.filter(function(p){return now-p.born<950;}).map(function(p){return p.text;})};}
+
+var breakables=[];
+function regBreakable(b){breakables.push(b);return b;}
+function makeBlock(x,y,w,h,mat){
+  var m=MATERIALS[mat];
+  return regBreakable(M.Bodies.rectangle(x,y,w,h,{density:m.density,friction:0.8,frictionStatic:1.5,restitution:0,label:'block',plugin:{material:mat,health:m.health,maxHealth:m.health,w:w,h:h,crush:0}}));
+}
+function makePumpkin(x,y){
+  // Plain whole pumpkin, stem on top when drawn, NO face (Alexander's locked rule).
+  return regBreakable(M.Bodies.circle(x,y,24,{density:MATERIALS.pumpkin.density,friction:0.6,frictionStatic:1,restitution:0,label:'pumpkin',plugin:{material:'pumpkin',health:MATERIALS.pumpkin.health,maxHealth:MATERIALS.pumpkin.health,radius:24,crush:0}}));
+}
+var tower=[];var towerPumpkin=null;var towerPumpkins=[];var towerStart=[];
+var baseY=GROUND_Y;
+// --- Stage 6 STRUCTURE BUILDER (Muse hand-coded) ---
+// Helpers place blocks by their BOTTOM edge on a surface height, so layouts
+// stack exactly instead of by hand-tuned centre arithmetic.
+// Weak-point design (fun research 2.1/2.3/3.4): stone mass rests on wood or
+// glass supports in every level; pumpkins sit visible in gaps, positioned to
+// die from falling mass / crush, not only from a direct dummy hit.
+function blk(cx,bottomY,w,h,mat){var b=makeBlock(cx,bottomY-h/2,w,h,mat);tower.push(b);return b;}
+function pkn(cx,bottomY){var p=makePumpkin(cx,bottomY-24);towerPumpkins.push(p);if(!towerPumpkin)towerPumpkin=p;return p;}
+function buildLevel1(){
+  // BIG house (amended Stage 6, 14 blocks), one pumpkin in the ground shelter.
+  // F1 fix (self critique #1, 2026-10-28 23:22 CT): the first enlarged build
+  // could not be beaten in 5 - the wood side cubes shielded the shelter and
+  // the 24-wide glass posts were hard for the 0.86-mass dummy to reach.
+  // Now: side cubes are GLASS 40s set wider out (a low shot breaks through
+  // instead of stopping), the shelter posts are THIN glass (16 wide, 80 tall)
+  // moved in to x 968/1112 so they stand exposed at flat-shot height, and the
+  // beam they carry is a heavier wood beam (264x26, mass ~6.9) whose bottom
+  // sits only ~32 px above the pumpkin top - break ONE post and the beam
+  // tips straight onto the pumpkin (crush: mass >= 2 resting on top).
+  // Storey bottoms above are re-stacked on the new beam top (baseY-106).
+  blk(860,baseY,40,40,'glass'); blk(1220,baseY,40,40,'glass'); // side cubes
+  blk(968,baseY,16,80,'glass'); blk(1112,baseY,16,80,'glass');
+  blk(1040,baseY-80,264,26,'wood');
+  blk(970,baseY-106,24,80,'wood'); blk(1110,baseY-106,24,80,'wood');
+  blk(1040,baseY-186,220,20,'glass');
+  blk(990,baseY-206,24,70,'glass'); blk(1090,baseY-206,24,70,'glass');
+  blk(1040,baseY-276,200,24,'wood');
+  blk(1010,baseY-300,20,50,'wood'); blk(1070,baseY-300,20,50,'wood');
+  blk(1040,baseY-350,170,24,'stone');
+  pkn(1040,baseY);
+}
+function buildLevel2(){
+  // BIG wide fort (17 blocks), two pumpkins: ground shelter + on the first
+  // beam. Weak points: glass ground posts AND glass third-storey posts, with
+  // stone caps above both, so a hit at either height brings mass down.
+  blk(850,baseY,50,50,'glass'); blk(1230,baseY,50,50,'glass'); // side cubes
+  blk(920,baseY,24,90,'glass'); blk(1160,baseY,24,90,'glass');
+  blk(1040,baseY-90,300,24,'wood');
+  blk(940,baseY-114,24,80,'wood'); blk(1140,baseY-114,24,80,'wood');
+  blk(1040,baseY-194,280,24,'stone');
+  blk(970,baseY-218,24,70,'glass'); blk(1110,baseY-218,24,70,'glass');
+  blk(1040,baseY-288,240,24,'wood');
+  blk(990,baseY-312,24,60,'wood'); blk(1090,baseY-312,24,60,'wood');
+  blk(1040,baseY-372,220,24,'stone');
+  blk(1015,baseY-396,20,44,'glass'); blk(1065,baseY-396,20,44,'glass');
+  blk(1040,baseY-440,150,20,'stone');
+  pkn(1040,baseY);
+  pkn(1040,baseY-114);
+}
+function buildLevel3(){
+  // BIG tall keep (19 blocks), three pumpkins on three storeys. Weak point
+  // stays the plan's seam: a wide GLASS base plank carrying the whole stack,
+  // plus glass posts in storey three; stone sits at two heights so any
+  // collapse drops heavy mass onto the pumpkins below.
+  blk(1040,baseY,260,20,'glass');                       // glass base plank (the seam)
+  blk(930,baseY-20,24,75,'wood'); blk(1150,baseY-20,24,75,'wood');
+  blk(1040,baseY-95,260,24,'wood');
+  blk(950,baseY-119,24,75,'wood'); blk(1130,baseY-119,24,75,'wood');
+  blk(1040,baseY-194,240,24,'stone');
+  blk(970,baseY-218,24,70,'glass'); blk(1110,baseY-218,24,70,'glass');
+  blk(1040,baseY-288,220,24,'wood');
+  blk(985,baseY-312,24,65,'wood'); blk(1095,baseY-312,24,65,'wood');
+  blk(1040,baseY-377,200,24,'stone');
+  blk(1005,baseY-401,20,50,'glass'); blk(1075,baseY-401,20,50,'glass');
+  blk(1040,baseY-451,160,20,'stone');
+  blk(880,baseY,46,46,'stone'); blk(1200,baseY,46,46,'wood'); // side cubes
+  pkn(1040,baseY-20);
+  pkn(1040,baseY-119);
+  pkn(1040,baseY-218);
+}
+var LEVEL_BUILDERS={1:buildLevel1,2:buildLevel2,3:buildLevel3};
+function buildTower(level){
+  tower=[];towerPumpkins=[];towerPumpkin=null;
+  (LEVEL_BUILDERS[level]||buildLevel1)();
+  M.Composite.add(world,tower);
+  for(var i=0;i<towerPumpkins.length;i++)M.Composite.add(world,towerPumpkins[i]);
+  // Pre-settle (F2 fix, self critique #1, 2026-10-28 23:5x CT): a tall stack
+  // sags ~1-1.5 px per contact layer in the solver during its first ~2 s
+  // (L3's cap sank 10.26 px over 7 layers, then froze solid). Run 150 fixed
+  // steps (2.5 s of game time) NOW, before the start snapshot, so the level
+  // is presented already settled and towerStart measures the standing tower
+  // the player actually sees. This hides nothing: a genuinely unstable
+  // structure still collapses or keeps drifting after the pre-settle, and
+  // the 30 s stability test still catches that. Settle speeds are ~0.1-0.5,
+  // far under every damage threshold (glass 2.5), and no pumpkin has a heavy
+  // body resting on it in any layout, so no damage or crush can trigger.
+  for(var ps=0;ps<150;ps++)M.Engine.update(engine,1000/60);
+  towerStart=tower.map(function(b){return {x:b.position.x,y:b.position.y,angle:b.angle};});
+}
+buildTower(1);
+
+var pendingRemoval=[];
+function damageBody(b,amount){
+  if(!b.plugin||!b.plugin.material||b.plugin.dead)return;
+  var before=b.plugin.health;
+  b.plugin.health-=amount;
+  // Crack moment (crossing half health, still alive): hit-stop.
+  if(before>b.plugin.maxHealth/2&&b.plugin.health<=b.plugin.maxHealth/2&&b.plugin.health>0)triggerHitStop();
+  if(b.plugin.health<=0 && pendingRemoval.indexOf(b)<0)pendingRemoval.push(b);
+}
+function relSpeed(a,b){return Math.hypot(a.velocity.x-b.velocity.x,a.velocity.y-b.velocity.y);}
+M.Events.on(engine,'collisionStart',function(ev){
+  for(var i=0;i<ev.pairs.length;i++){
+    var p=ev.pairs[i];
+    var rs=relSpeed(p.bodyA,p.bodyB);
+    var sides=[[p.bodyA],[p.bodyB]];
+    for(var s=0;s<2;s++){
+      var b=sides[s][0];
+      if(b.plugin&&b.plugin.material){
+        var th=MATERIALS[b.plugin.material].threshold;
+        if(rs>th)damageBody(b,rs);
+      }
+    }
+  }
+});
+M.Events.on(engine,'collisionActive',function(ev){
+  // Crush: a heavy body (mass >= 2) resting on top of a pumpkin for ~30 steps
+  // (~0.5 s at 60 steps/s) squashes it, even at near-zero impact speed.
+  for(var i=0;i<ev.pairs.length;i++){
+    var p=ev.pairs[i];
+    var pk=null,other=null;
+    if(p.bodyA.plugin&&p.bodyA.plugin.material==='pumpkin'){pk=p.bodyA;other=p.bodyB;}
+    else if(p.bodyB.plugin&&p.bodyB.plugin.material==='pumpkin'){pk=p.bodyB;other=p.bodyA;}
+    if(!pk||pk.plugin.dead||other.isStatic)continue;
+    if(other.position.y<pk.position.y-10 && other.mass>=2){
+      pk.plugin.crush++;
+      if(pk.plugin.crush>=30)damageBody(pk,pk.plugin.health+1);
+    }
+  }
+});
+var gameState={level:1,dummiesLeft:5,launchesUsed:0,phase:'ready',stars:0};
+function updateHUD(){
+  var el=document.getElementById('hud-info');
+  // Shortened (Stage 7, H2 fix): the long Stage 5 line clipped on the right
+  // in every screenshot (critique #3). "Dummies: N" wording is kept verbatim
+  // (test-stage5 reads it); block/pumpkin counts move to short forms.
+  if(el)el.textContent='Level '+gameState.level+' | Dummies: '+gameState.dummiesLeft+' | Score '+scoreState.score+' | Blk '+scoreState.blocksBroken+' | Pkn '+scoreState.pumpkinsSquashed+' | '+gameState.phase;
+  if(typeof syncLevelButtons==='function')syncLevelButtons();
+  updateOverlay();
+}
+function updateOverlay(){
+  var ov=document.getElementById('overlay');if(!ov)return;
+  var title=document.getElementById('overlay-title'),txt=document.getElementById('overlay-text'),nx=document.getElementById('btn-next');
+  if(gameState.phase==='won'){ov.style.display='block';title.textContent='Level cleared!';txt.textContent='Stars: '+gameState.stars+' of 3 | Score '+scoreState.score;nx.style.display='inline-block';}
+  else if(gameState.phase==='lost'){ov.style.display='block';title.textContent='Out of dummies';txt.textContent='Pumpkins left: '+breakables.filter(function(b){return b.plugin.material==='pumpkin';}).length+' | Score '+scoreState.score;nx.style.display='none';}
+  else{ov.style.display='none';}
+}
+M.Events.on(engine,'afterUpdate',function(){
+  if(!pendingRemoval.length)return;
+  var list=pendingRemoval;pendingRemoval=[];
+  for(var i=0;i<list.length;i++){
+    var b=list[i];b.plugin.dead=true;
+    if(b.plugin.material==='pumpkin'){scoreState.pumpkinsSquashed++;scoreState.score+=100;addPopup(b.position.x,b.position.y-14,'+100');triggerHitStop();}
+    else{scoreState.blocksBroken++;scoreState.score+=10;addPopup(b.position.x,b.position.y-10,'+10');}
+    M.Composite.remove(world,b);
+    var ix=breakables.indexOf(b);if(ix>=0)breakables.splice(ix,1);
+  }
+  updateHUD();
+});
+
+// --- Ragdoll factory ---
+// Scale 0.25 EXACT (Alexander decision 13, fixed 2026-10-28 22:45 CT: "Make him
+// 1/4 of the size he is currently" = 0.25 of the ORIGINAL scale-1 sizes; the
+// interim 0.75 build was wrong and is superseded). Every part size, offset,
+// chamfer and joint anchor below is the scale-1 official size (research notes
+// section 1) multiplied by 0.25; density stays 0.001 so each part's mass scales
+// with its area (total ~0.86 vs ~13.8 at scale 1). Total height ~52 px
+// (head top -20 to feet +31.75, relative to chest centre).
+function createDummy(x,y){
+  var group=M.Body.nextGroup(true); // ONE shared negative group: parts never collide with each other
+  function part(name,w,h,ox,oy,chamfer){
+    return M.Bodies.rectangle(x+ox,y+oy,w,h,{
+      density:0.001,friction:0.5,frictionAir:0.01,restitution:0,
+      collisionFilter:{group:group},label:'dummy',
+      chamfer:{radius:chamfer},plugin:{part:name,w:w,h:h}
+    });
+  }
+  var head=part('head',8.5,10,0,-15,3.5);
+  var chest=part('chest',13.75,20,0,0,5);
+  var uArmL=part('upperArmL',5,10,-9.75,-3.75,2);
+  var lArmL=part('lowerArmL',5,15,-9.75,6.25,2);
+  var uArmR=part('upperArmR',5,10,9.75,-3.75,2);
+  var lArmR=part('lowerArmR',5,15,9.75,6.25,2);
+  var uLegL=part('upperLegL',5,10,-5,14.25,2);
+  var lLegL=part('lowerLegL',5,15,-5,24.25,2);
+  var uLegR=part('upperLegR',5,10,5,14.25,2);
+  var lLegR=part('lowerLegR',5,15,5,24.25,2);
+  var parts=[head,chest,uArmL,lArmL,uArmR,lArmR,uLegL,lLegL,uLegR,lLegR];
+  function joint(a,pa,b,pb,stiff){
+    return M.Constraint.create({bodyA:a,pointA:pa,bodyB:b,pointB:pb,stiffness:stiff,damping:0});
+  }
+  // Dual-anchor joint: two constraints offset sideways by `off` px. A single point
+  // joint lets a part rotate freely around the pivot (the head toppled at hang and
+  // limbs windmilled multiple full turns in the first test, probe-stage2 2026-10-28);
+  // the second anchor resists rotation while staying floppy. Stiffness raised from
+  // the research 0.6 to 0.9 per the research note itself: "If the dummy stretches
+  // apart during the slingshot pull, raise joint stiffness before anything else."
+  function dual(a,pa,b,pb,stiff,off){
+    return [
+      joint(a,{x:pa.x-off,y:pa.y},b,{x:pb.x-off,y:pb.y},stiff),
+      joint(a,{x:pa.x+off,y:pa.y},b,{x:pb.x+off,y:pb.y},stiff)
+    ];
+  }
+  var joints=[];
+  // Joint anchors = the proven 0.75-build anchors divided by 3 (= 0.25 of the
+  // original geometry), dual offsets likewise (6->2, 5->1.67).
+  joints=joints.concat(dual(head,{x:0,y:5},chest,{x:0,y:-9.67},0.9,2));
+  joints=joints.concat(dual(chest,{x:-6.67,y:-6.33},uArmL,{x:0,y:-4.67},0.9,1.67));
+  joints=joints.concat(dual(chest,{x:6.67,y:-6.33},uArmR,{x:0,y:-4.67},0.9,1.67));
+  joints=joints.concat(dual(uArmL,{x:0,y:4.67},lArmL,{x:0,y:-7},0.9,1.67));
+  joints=joints.concat(dual(uArmR,{x:0,y:4.67},lArmR,{x:0,y:-7},0.9,1.67));
+  joints=joints.concat(dual(chest,{x:-5,y:9.67},uLegL,{x:0,y:-4.67},0.9,1.67));
+  joints=joints.concat(dual(chest,{x:5,y:9.67},uLegR,{x:0,y:-4.67},0.9,1.67));
+  joints=joints.concat(dual(uLegL,{x:0,y:4.67},lLegL,{x:0,y:-7},0.9,1.67));
+  joints=joints.concat(dual(uLegR,{x:0,y:4.67},lLegR,{x:0,y:-7},0.9,1.67));
+  joints.push(joint(lLegL,{x:0,y:0},lLegR,{x:0,y:0},0.01));
+  // Rest distances between joint anchors at spawn (rotation 0, so position+offset).
+  var rest=joints.map(function(c){
+    var ax=c.bodyA.position.x+c.pointA.x, ay=c.bodyA.position.y+c.pointA.y;
+    var bx=c.bodyB.position.x+c.pointB.x, by=c.bodyB.position.y+c.pointB.y;
+    return Math.hypot(bx-ax,by-ay);
+  });
+  var comp=M.Composite.create({label:'dummy'});
+  M.Composite.add(comp,parts);
+  M.Composite.add(comp,joints);
+  return {composite:comp,parts:parts,chest:chest,joints:joints,rest:rest,byName:{
+    head:head,chest:chest,uArmL:uArmL,lArmL:lArmL,uArmR:uArmR,lArmR:lArmR,
+    uLegL:uLegL,lLegL:lLegL,uLegR:uLegR,lLegR:lLegR}};
+}
+var dummy=createDummy(ANCHOR.x,ANCHOR.y);
+M.Composite.add(world,dummy.composite);
+var chest=dummy.chest;
+// Elastic stiffness tuned up from the official 0.05: the ragdoll's total mass is
+// ~13.8 vs the official rock's ~5, and at 0.05 it could not reach the tower
+// (probe/test 2026-10-28: best chest landing x=803, tower base x=980). Research
+// notes flag exactly this tuning.
+var elastic=M.Constraint.create({pointA:{x:ANCHOR.x,y:ANCHOR.y},bodyB:chest,pointB:{x:0,y:0},stiffness:0.12,damping:0});
+M.Composite.add(world,elastic);
+
+var dragging=false,firing=false,launched=false;
+function clampToAnchor(p){
+  var dx=p.x-ANCHOR.x,dy=p.y-ANCHOR.y;var d=Math.hypot(dx,dy);
+  if(d>MAX_DRAG){dx=dx/d*MAX_DRAG;dy=dy/d*MAX_DRAG;}
+  return {x:ANCHOR.x+dx,y:ANCHOR.y+dy};
+}
+function moveDummyTo(newChest){
+  var dx=newChest.x-chest.position.x, dy=newChest.y-chest.position.y;
+  for(var i=0;i<dummy.parts.length;i++){
+    var b=dummy.parts[i];
+    M.Body.setPosition(b,{x:b.position.x+dx,y:b.position.y+dy});
+    M.Body.setVelocity(b,{x:0,y:0});
+    M.Body.setAngularVelocity(b,0);
+  }
+}
+function setDummyStatic(v){
+  for(var i=0;i<dummy.parts.length;i++){M.Body.setStatic(dummy.parts[i],v);if(!v)M.Sleeping.set(dummy.parts[i],false);}
+}
+var canvas=document.getElementById('game');
+var ctx=canvas.getContext('2d');
+function toGame(e){var r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*(W/r.width),y:(e.clientY-r.top)*(H/r.height)};}
+canvas.addEventListener('mousedown',function(e){
+  var p=toGame(e);
+  if(!launched && Math.hypot(p.x-chest.position.x,p.y-chest.position.y)<70){dragging=true;setDummyStatic(true);}
+});
+window.addEventListener('mousemove',function(e){
+  if(!dragging)return;moveDummyTo(clampToAnchor(toGame(e)));
+});
+window.addEventListener('mouseup',function(){
+  if(!dragging)return;dragging=false;setDummyStatic(false);firing=true;restState.restSteps=0;restState.allRest=false;
+});
+M.Events.on(engine,'afterUpdate',function(){
+  if(firing && elastic.bodyB){
+    var d=Math.hypot(chest.position.x-ANCHOR.x,chest.position.y-ANCHOR.y);
+    if(d<20){elastic.bodyB=null;firing=false;launched=true;gameState.launchesUsed++;gameState.dummiesLeft=Math.max(0,5-gameState.launchesUsed);gameState.phase='flying';restState.restSteps=0;restState.allRest=false;flySteps=0;updateHUD();}
+  }
+});
+
+function botLaunch(dragX,dragY){
+  if(launched||gameState.phase==='won'||gameState.phase==='lost')return false;
+  setDummyStatic(true);
+  moveDummyTo(clampToAnchor({x:dragX,y:dragY}));
+  setDummyStatic(false);firing=true;
+  // Rest-state reset on every launch (fix 2026-10-28 22:5x CT, Stage 4
+  // re-verification): the tiny 0.25 dummy sits perfectly still at the anchor,
+  // so allRest was already true from pre-launch stillness and a rest check
+  // could judge the flight before it began. Rest must be re-earned in flight.
+  restState.restSteps=0;restState.allRest=false;
+  return true;
+}
+function jointStretch(){
+  // Matter MUTATES constraint pointA/pointB in place: it rotates them with the
+  // body each solve, so a live point is already the world-frame offset from the
+  // body centre. World anchor = position + point, NO extra rotation. (Verified
+  // 2026-10-28 with probe-joint.js: rotating again double-counts and invents
+  // ~100 px of phantom stretch; the direct sum gives distances at rest.)
+  var max=0,worst=-1;
+  for(var i=0;i<dummy.joints.length;i++){
+    var c=dummy.joints[i];
+    var ax=c.bodyA.position.x+c.pointA.x, ay=c.bodyA.position.y+c.pointA.y;
+    var bx=c.bodyB.position.x+c.pointB.x, by=c.bodyB.position.y+c.pointB.y;
+    var d=Math.hypot(bx-ax,by-ay);
+    var stretch=Math.abs(d-dummy.rest[i]);
+    if(stretch>max){max=stretch;worst=i;}
+  }
+  return {maxStretchPx:max,worstJoint:worst};
+}
+function bodyHealth(id){
+  var all=M.Composite.allBodies(world);
+  for(var i=0;i<all.length;i++){if(all[i].id===id)return {exists:true,health:all[i].plugin?all[i].plugin.health:null,material:all[i].plugin?all[i].plugin.material:null};}
+  return {exists:false,health:null,material:null};
+}
+function spawnBlockAt(mat,x,y,w,h){var b=makeBlock(x,y,w,h,mat);M.Composite.add(world,b);return b.id;}
+function spawnPumpkinAt(x,y){var b=makePumpkin(x,y);M.Composite.add(world,b);return b.id;}
+function testImpact(material,speed){
+  // Scripted impact: target and a heavy ball spawn together in mid-air and fall
+  // together, so their relative speed at contact is the ball's set speed.
+  var target=(material==='pumpkin')?makePumpkin(800,300):makeBlock(800,300,44,44,material);
+  M.Composite.add(world,target);
+  var ball=M.Bodies.circle(745,300,16,{density:0.005,friction:0.1,restitution:0,label:'testball'});
+  M.Composite.add(world,ball);
+  M.Body.setVelocity(ball,{x:speed,y:0});
+  return {targetId:target.id,ballId:ball.id};
+}
+// --- Stage 4 PHYSICS HARDENING instrumentation (Muse hand-coded) ---
+// Step timing: measured around every fixed Engine.update in the frame loop.
+// Rest detection (quality bar: "Rest before judgment"): allRest is true only
+// after EVERY non-static body stays below 0.15 speed AND 0.15 angular speed,
+// or asleep, for a full second (60 consecutive steps).
+var stepStats={steps:0,totalMs:0,maxMs:0,lastMs:0};
+var restState={restSteps:0,allRest:false,maxBodySpeed:0};
+M.Events.on(engine,'afterUpdate',function(){
+  var bodies=M.Composite.allBodies(world);
+  var mx=0,ma=0;
+  for(var i=0;i<bodies.length;i++){
+    var b=bodies[i];
+    if(b.isStatic)continue;
+    if(b.isSleeping)continue;
+    mx=Math.max(mx,Math.hypot(b.velocity.x,b.velocity.y));
+    // Angular wrap fix (2026-10-28 23:0x CT, probe-rest025): Matter derives
+    // angularVelocity from the angle delta, so a part lying at angle ~ +/-PI
+    // that micro-jitters across the wrap reports a spurious +/-2*PI per step
+    // forever (head +6.282, upperLegL -6.282 at linear speed ~0.05), which
+    // defeated the angular rest check at the 0.25 dummy scale. Wrap the delta
+    // into [-PI, PI] before judging rest; real spins here are far below PI/step.
+    ma=Math.max(ma,Math.abs(Math.atan2(Math.sin(b.angularVelocity),Math.cos(b.angularVelocity))));
+  }
+  restState.maxBodySpeed=mx;
+  // Threshold note (Stage 4 test 2026-10-28): a settled dummy keeps one part
+  // creeping at ~0.19 speed indefinitely, so 0.15 never fired. Rest uses the
+  // Stage 2 proven rest criterion: linear <0.35 px/step (~21 px/s) plus a
+  // separate tight angular check <0.05 rad/step, sustained 60 steps.
+  if(mx<0.35&&ma<0.05){restState.restSteps++;}else{restState.restSteps=0;}
+  restState.allRest=restState.restSteps>=60;
+});
+function stepStatsFn(){return {steps:stepStats.steps,avgMs:stepStats.steps?Math.round(stepStats.totalMs/stepStats.steps*1000)/1000:0,maxMs:Math.round(stepStats.maxMs*1000)/1000,lastMs:Math.round(stepStats.lastMs*1000)/1000,bodies:M.Composite.allBodies(world).length};}
+function restInfo(){return {allRest:restState.allRest,restSteps:restState.restSteps,restMs:restState.restSteps*1000/60,maxBodySpeed:Math.round(restState.maxBodySpeed*1000)/1000};}
+function spawnGrid(cols,rows){
+  var ids=[];
+  for(var r=0;r<rows;r++){for(var c=0;c<cols;c++){ids.push(spawnBlockAt(r%3===0?'glass':'wood',300+c*44,GROUND_Y-11-r*22,40,20));}}
+  return ids.length;
+}
+// --- Stage 5 GAME FLOW (Muse hand-coded, Pi role folded in per foreman call) ---
+// Win: every pumpkin destroyed. Lose: 5 dummies launched and pumpkins remain.
+// Judgment only at full rest (Stage 4 rest detection, allRest for 60 steps).
+function calcStars(){var st=1;if(gameState.dummiesLeft>=2)st++;if(scoreState.blocksBroken>=2)st++;return st;}
+function removeCurrentDummy(){
+  if(elastic&&elastic.bodyB!==undefined)M.Composite.remove(world,elastic);
+  if(dummy)M.Composite.remove(world,dummy.composite);
+}
+function spawnFreshDummy(){
+  dummy=createDummy(ANCHOR.x,ANCHOR.y);
+  M.Composite.add(world,dummy.composite);
+  chest=dummy.chest;
+  elastic=M.Constraint.create({pointA:{x:ANCHOR.x,y:ANCHOR.y},bodyB:chest,pointB:{x:0,y:0},stiffness:0.12,damping:0});
+  M.Composite.add(world,elastic);
+  launched=false;firing=false;dragging=false;
+}
+function startLevel(level){
+  var copy=breakables.slice();
+  for(var i=0;i<copy.length;i++){M.Composite.remove(world,copy[i]);}
+  breakables.length=0;pendingRemoval=[];
+  removeCurrentDummy();
+  scoreState.score=0;scoreState.blocksBroken=0;scoreState.pumpkinsSquashed=0;
+  if(level>3)level=1; if(level<1)level=1;
+  gameState.level=level;gameState.dummiesLeft=5;gameState.launchesUsed=0;gameState.phase='ready';gameState.stars=0;
+  juice.popups=[];juice.hitStopUntil=0;juice.hitStops=0;
+  buildTower(level);
+  spawnFreshDummy();
+  restState.restSteps=0;restState.allRest=false;
+  updateHUD();
+}
+var flySteps=0;
+function evaluateRest(){
+  if(gameState.phase!=='flying')return;
+  flySteps++;
+  // Rest judgment (Stage 4 bar): allRest for a full second. Stall guard: a
+  // crumpled dummy can twitch one limb above the rest band indefinitely
+  // (probe-stage5 2026-10-28: parts oscillating at ~0.4-0.8 speed); after
+  // 30 game-seconds of flight with everything below 1.0 speed, judge anyway
+  // so a turn can never hang forever.
+  var stalled=flySteps>1800&&restState.maxBodySpeed<1.0;
+  if(!restState.allRest&&!stalled)return;
+  flySteps=0;
+  var alive=breakables.filter(function(b){return b.plugin.material==='pumpkin';}).length;
+  if(alive===0){gameState.phase='won';gameState.stars=calcStars();}
+  else if(gameState.dummiesLeft>0){removeCurrentDummy();spawnFreshDummy();gameState.phase='ready';}
+  else{gameState.phase='lost';}
+  updateHUD();
+}
+M.Events.on(engine,'afterUpdate',evaluateRest);
+function gameInfo(){return {level:gameState.level,dummiesLeft:gameState.dummiesLeft,launchesUsed:gameState.launchesUsed,phase:gameState.phase,stars:gameState.stars};}
+function testSquashPumpkins(){
+  var n=0;var copy=breakables.slice();
+  for(var i=0;i<copy.length;i++){if(copy[i].plugin.material==='pumpkin'){damageBody(copy[i],copy[i].plugin.health+1);n++;}}
+  return n;
+}
+var btnR=document.getElementById('btn-retry');if(btnR)btnR.addEventListener('click',function(){startLevel(gameState.level);});
+var btnN=document.getElementById('btn-next');if(btnN)btnN.addEventListener('click',function(){startLevel(gameState.level+1);});
+// Level select (Stage 7): buttons jump straight to a level, resetting score/dummies.
+var lvlBtns=document.querySelectorAll('.lvl-btn');
+for(var lb=0;lb<lvlBtns.length;lb++){(function(btn){btn.addEventListener('click',function(){startLevel(parseInt(btn.getAttribute('data-level'),10));});})(lvlBtns[lb]);}
+function syncLevelButtons(){if(!lvlBtns)return;for(var i=0;i<lvlBtns.length;i++){var b=lvlBtns[i];if(parseInt(b.getAttribute('data-level'),10)===gameState.level)b.classList.add('active');else b.classList.remove('active');}}
+updateHUD();
+function state(){
+  var top=tower[tower.length-1];
+  var moved=0;for(var i=0;i<tower.length;i++){moved=Math.max(moved,Math.hypot(tower[i].position.x-towerStart[i].x,tower[i].position.y-towerStart[i].y),Math.abs(tower[i].angle-towerStart[i].angle));}
+  var maxSpeed=0, maxPartSpread=0;
+  for(var i=0;i<dummy.parts.length;i++){
+    var b=dummy.parts[i];
+    maxSpeed=Math.max(maxSpeed,Math.hypot(b.velocity.x,b.velocity.y));
+    maxPartSpread=Math.max(maxPartSpread,Math.hypot(b.position.x-chest.position.x,b.position.y-chest.position.y));
+  }
+  var js=jointStretch();
+  var partsOut={};
+  for(var k in dummy.byName){var bp=dummy.byName[k];partsOut[k]={x:Math.round(bp.position.x),y:Math.round(bp.position.y),angle:Math.round(bp.angle*100)/100};}
+  return {chest:{x:chest.position.x,y:chest.position.y,vx:chest.velocity.x,vy:chest.velocity.y},
+    launched:launched,firing:firing,parts:partsOut,maxSpeed:maxSpeed,
+    maxPartSpread:maxPartSpread,maxJointStretchPx:js.maxStretchPx,worstJoint:js.worstJoint,
+    top:{x:top.position.x,y:top.position.y,angle:top.angle},towerMaxChange:moved,errors:window.__errors.slice(),
+    score:scoreState.score,blocksBroken:scoreState.blocksBroken,pumpkinsSquashed:scoreState.pumpkinsSquashed,
+    pumpkinsAlive:breakables.filter(function(b){return b.plugin.material==='pumpkin';}).length,
+    breakablesAlive:breakables.length,
+    stepAvgMs:stepStatsFn().avgMs,stepMaxMs:stepStatsFn().maxMs,stepCount:stepStats.steps,bodyCount:stepStatsFn().bodies,
+    allRest:restState.allRest,restSteps:restState.restSteps,maxBodySpeed:Math.round(restState.maxBodySpeed*1000)/1000,
+    phase:gameState.phase,dummiesLeft:gameState.dummiesLeft,level:gameState.level,stars:gameState.stars,launchesUsed:gameState.launchesUsed,
+    juiceHitStops:juice.hitStops,juicePopups:juiceInfo().popups};
+}
+function imagesInfo(){var o={};for(var k in IMG)o[k]=imgReady(IMG[k]);return o;}
+window.DD={engine:engine,world:world,get dummy(){return dummy;},get chest(){return chest;},get tower(){return tower;},get elastic(){return elastic;},anchor:ANCHOR,botLaunch:botLaunch,state:state,bodyHealth:bodyHealth,spawnBlockAt:spawnBlockAt,spawnPumpkinAt:spawnPumpkinAt,testImpact:testImpact,materials:MATERIALS,stepStats:stepStatsFn,restInfo:restInfo,spawnGrid:spawnGrid,gameInfo:gameInfo,startLevel:startLevel,testSquashPumpkins:testSquashPumpkins,imagesInfo:imagesInfo,juiceInfo:juiceInfo};
+
+var last=performance.now(),acc=0,STEP=1000/60;
+function frame(now){
+  requestAnimationFrame(frame);
+  // Hit-stop: freeze physics for ~60 ms on crack / pumpkin break. The
+  // accumulator is cleared so the pause is not repaid as a burst of steps.
+  if(now<juice.hitStopUntil){last=now;acc=0;draw();return;}
+  var dt=now-last;last=now;if(dt>250)dt=250;acc+=dt;
+  while(acc>=STEP){var t0=performance.now();M.Engine.update(engine,STEP);var ms=performance.now()-t0;stepStats.steps++;stepStats.totalMs+=ms;stepStats.lastMs=ms;if(ms>stepStats.maxMs)stepStats.maxMs=ms;acc-=STEP;}
+  draw();
+}
+// --- Stage 7 DRAW PASS (Muse hand-coded, H1 of critique #3) ---
+// Generated art as stickers (Alexander's idea, 2026-10-28 23:09 CT): the
+// background picture fills the canvas; each block paints its material
+// texture CROPPED through a source rectangle to the block's shape (never
+// stretched whole), cracks drawn OVER the texture. If an image has not
+// loaded, a flat shaded fill stands in. Drawing only - physics untouched.
+var IMG={};
+function loadImg(key,src){var i=new Image();i.src=src;IMG[key]=i;}
+loadImg('bg','background.jpg');loadImg('wood','tex-wood.jpg');
+loadImg('stone','tex-stone.jpg');loadImg('ice','tex-ice.jpg');
+function imgReady(i){return i&&i.complete&&i.naturalWidth>0;}
+var TEXFOR={wood:'wood',stone:'stone',glass:'ice'};
+function drawBlock(b){
+  var w=b.plugin.w||40,h=b.plugin.h||24,mat=b.plugin.material;
+  ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+  ctx.beginPath();ctx.rect(-w/2,-h/2,w,h);ctx.clip();
+  var img=IMG[TEXFOR[mat]];
+  if(imgReady(img)){
+    // Crop, never stretch whole: the source window covers ~300 game px of
+    // texture, offset per body id so neighbouring blocks do not repeat.
+    var sw=Math.min(512,w/300*512),sh=Math.min(512,h/300*512);
+    var sx=(b.id*37)%Math.max(1,512-sw),sy=(b.id*53)%Math.max(1,512-sh);
+    ctx.drawImage(img,sx,sy,sw,sh,-w/2,-h/2,w,h);
+    if(mat==='glass')ctx.fillStyle='rgba(190,230,240,0.38)';
+    else if(mat==='stone')ctx.fillStyle='rgba(70,70,80,0.10)';
+    else ctx.fillStyle='rgba(120,70,20,0.08)';
+    ctx.fillRect(-w/2,-h/2,w,h);
+  }else{
+    ctx.fillStyle=MATERIALS[mat].color;ctx.fillRect(-w/2,-h/2,w,h);
+    if(mat==='wood'){ctx.strokeStyle='rgba(80,50,15,0.5)';ctx.lineWidth=1;for(var g=1;g<4;g++){ctx.beginPath();ctx.moveTo(-w/2,-h/2+h*g/4);ctx.lineTo(w/2,-h/2+h*g/4);ctx.stroke();}}
+    if(mat==='glass'){ctx.strokeStyle='rgba(255,255,255,0.7)';ctx.beginPath();ctx.moveTo(-w/2+4,h/2-3);ctx.lineTo(w/2-8,-h/2+3);ctx.stroke();}
+    if(mat==='stone'){ctx.fillStyle='rgba(40,40,40,0.35)';for(var s=0;s<5;s++){ctx.fillRect(((b.id*31+s*47)%Math.max(2,w))-w/2,((b.id*17+s*29)%Math.max(2,h))-h/2,2,2);}}
+  }
+  // Shading: top highlight, darker bottom edge (kills the flat 2003 look).
+  var grad=ctx.createLinearGradient(0,-h/2,0,h/2);
+  grad.addColorStop(0,'rgba(255,255,255,0.22)');grad.addColorStop(0.5,'rgba(255,255,255,0)');
+  grad.addColorStop(1,'rgba(0,0,0,0.20)');ctx.fillStyle=grad;ctx.fillRect(-w/2,-h/2,w,h);
+  ctx.restore();
+  ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+  ctx.strokeStyle='rgba(25,20,15,0.85)';ctx.lineWidth=1.5;ctx.strokeRect(-w/2,-h/2,w,h);
+  // Crack marks OVER the texture at half health or below.
+  if(b.plugin.health<=b.plugin.maxHealth/2){
+    ctx.strokeStyle='rgba(15,15,15,0.85)';ctx.lineWidth=1.5;ctx.beginPath();
+    ctx.moveTo(-w/2,-h/2);ctx.lineTo(-w*0.15,0);ctx.lineTo(-w*0.3,h/2);
+    ctx.moveTo(w/2,-h*0.2);ctx.lineTo(w*0.1,h*0.1);ctx.lineTo(w*0.25,h/2);
+    ctx.stroke();
+  }
+  ctx.restore();ctx.lineWidth=1;
+}
+function drawDummyPart(b){
+  var w=b.plugin.w||10,h=b.plugin.h||10,name=b.plugin.part;
+  ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+  ctx.fillStyle='#f2c018';ctx.strokeStyle='#1c1c1c';ctx.lineWidth=1.2;
+  ctx.beginPath();ctx.rect(-w/2,-h/2,w,h);ctx.fill();ctx.stroke();
+  // Top highlight for a little depth.
+  ctx.fillStyle='rgba(255,255,255,0.25)';ctx.fillRect(-w/2,-h/2,w,Math.max(1,h*0.25));
+  if(name==='chest'){
+    // Crash-test target on the chest: black / yellow / black concentric.
+    var r=Math.min(w,h)*0.34;
+    ctx.fillStyle='#111';ctx.beginPath();ctx.arc(0,0,r,0,7);ctx.fill();
+    ctx.fillStyle='#f2c018';ctx.beginPath();ctx.arc(0,0,r*0.62,0,7);ctx.fill();
+    ctx.fillStyle='#111';ctx.beginPath();ctx.arc(0,0,r*0.3,0,7);ctx.fill();
+  }else if(name==='head'){
+    // Helmet band across the top of the head. No face drawn.
+    ctx.fillStyle='#111';ctx.fillRect(-w/2,-h/2,w,Math.max(1.5,h*0.28));
+    ctx.fillStyle='#f2c018';ctx.fillRect(-w/2,-h/2,Math.max(1.5,w*0.3),Math.max(1.5,h*0.28));
+  }else{
+    // Black check squares at the limb ends + a joint dot in the middle.
+    var q=Math.min(w,h)*0.45;
+    ctx.fillStyle='#111';
+    ctx.fillRect(-w/2,-h/2,q,q);ctx.fillRect(w/2-q,h/2-q,q,q);
+    ctx.beginPath();ctx.arc(0,0,Math.max(1,q*0.35),0,7);ctx.fill();
+  }
+  ctx.restore();ctx.lineWidth=1;
+}
+function drawBody(b){
+  if(b.label==='block'){drawBlock(b);return;}
+  if(b.label==='dummy'){drawDummyPart(b);return;}
+  var v=b.vertices;ctx.beginPath();ctx.moveTo(v[0].x,v[0].y);for(var i=1;i<v.length;i++)ctx.lineTo(v[i].x,v[i].y);ctx.closePath();
+  ctx.fillStyle='#888';ctx.fill();ctx.strokeStyle='#222';ctx.stroke();
+}
+function drawPumpkin(b){
+  ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+  ctx.fillStyle=MATERIALS.pumpkin.color;ctx.beginPath();ctx.arc(0,0,b.plugin.radius,0,7);ctx.fill();
+  ctx.fillStyle='rgba(255,210,140,0.35)';ctx.beginPath();ctx.ellipse(-b.plugin.radius*0.35,-b.plugin.radius*0.4,b.plugin.radius*0.32,b.plugin.radius*0.2,-0.6,0,7);ctx.fill();
+  ctx.fillStyle='rgba(90,35,0,0.18)';ctx.beginPath();ctx.ellipse(b.plugin.radius*0.3,b.plugin.radius*0.45,b.plugin.radius*0.4,b.plugin.radius*0.22,-0.4,0,7);ctx.fill();
+  ctx.strokeStyle='#a85a12';ctx.lineWidth=2;ctx.beginPath();ctx.arc(0,0,b.plugin.radius,0,7);ctx.stroke();
+  ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(0,0,b.plugin.radius*0.55,b.plugin.radius,0,0,7);ctx.stroke();
+  ctx.beginPath();ctx.ellipse(0,0,b.plugin.radius*0.2,b.plugin.radius,0,0,7);ctx.stroke();
+  // Stem only. No face of any kind.
+  ctx.fillStyle='#5a7c2a';ctx.fillRect(-3,-b.plugin.radius-8,6,9);
+  ctx.restore();
+  if(b.plugin.health<=b.plugin.maxHealth/2){
+    ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+    ctx.strokeStyle='rgba(60,30,0,0.8)';ctx.lineWidth=1.5;ctx.beginPath();
+    ctx.moveTo(-14,-10);ctx.lineTo(-4,2);ctx.lineTo(-10,14);ctx.stroke();ctx.restore();
+  }
+}
+function drawSlingshot(){
+  // A real forked slingshot (Alexander's order 2026-10-28 22:37 CT): wooden
+  // base on the ground, a trunk, two fork prongs, and elastic bands from
+  // BOTH prong tips to the dummy that visibly stretch as he is pulled back.
+  var bx=ANCHOR.x,topY=ANCHOR.y,baseY2=GROUND_Y;
+  ctx.strokeStyle='#5a3a1a';ctx.fillStyle='#6e4520';ctx.lineCap='round';
+  // Base: a flat wooden foot on the ground.
+  ctx.fillRect(bx-26,baseY2-8,52,8);
+  ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fillRect(bx-26,baseY2-8,52,2);
+  // Trunk from the base up to the fork split.
+  ctx.lineWidth=10;ctx.beginPath();ctx.moveTo(bx,baseY2-6);ctx.lineTo(bx,topY+30);ctx.stroke();
+  // Fork prongs, WIDE and tall (improvement 1, 2026-10-29): tips at +/-22 px
+  // and 16 px above the anchor, so the V reads clearly even with the tiny
+  // 0.25 dummy sitting in it (at +/-13 the dummy hid the whole fork).
+  ctx.lineWidth=8;ctx.beginPath();ctx.moveTo(bx,topY+30);ctx.lineTo(bx-22,topY-16);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(bx,topY+30);ctx.lineTo(bx+22,topY-16);ctx.stroke();
+  ctx.lineWidth=1;ctx.lineCap='butt';
+  // Bands: prong tips to the chest while the elastic is attached.
+  if(elastic.bodyB){
+    ctx.strokeStyle='#8c2f23';ctx.lineWidth=3.5;
+    ctx.beginPath();ctx.moveTo(bx-22,topY-16);ctx.lineTo(chest.position.x,chest.position.y);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(bx+22,topY-16);ctx.lineTo(chest.position.x,chest.position.y);ctx.stroke();
+    ctx.lineWidth=1;
+  }
+}
+function drawSlingshotFront(){
+  // Improvement 1: the FRONT (right) prong and its band are redrawn OVER the
+  // dummy after the bodies, so at rest the fork visibly cradles him instead
+  // of disappearing behind him. Drawing only; no physics touched.
+  var bx=ANCHOR.x,topY=ANCHOR.y;
+  ctx.lineCap='round';
+  if(elastic.bodyB){
+    ctx.strokeStyle='#8c2f23';ctx.lineWidth=3.5;
+    ctx.beginPath();ctx.moveTo(bx+22,topY-16);ctx.lineTo(chest.position.x,chest.position.y);ctx.stroke();
+  }
+  ctx.strokeStyle='#4a2c12';ctx.lineWidth=10;
+  ctx.beginPath();ctx.moveTo(bx,topY+30);ctx.lineTo(bx+22,topY-16);ctx.stroke();
+  ctx.strokeStyle='#7a4e24';ctx.lineWidth=7;
+  ctx.beginPath();ctx.moveTo(bx,topY+30);ctx.lineTo(bx+22,topY-16);ctx.stroke();
+  ctx.fillStyle='#8a5a2a';ctx.beginPath();ctx.arc(bx+22,topY-16,4,0,7);ctx.fill();
+  ctx.lineWidth=1;ctx.lineCap='butt';
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // Background picture fills the canvas (its ground strip sits at the
+  // bottom, on the game's ground line); gradient sky is the fallback.
+  if(imgReady(IMG.bg)){ctx.drawImage(IMG.bg,0,0,W,H);}
+  else{
+    var sky=ctx.createLinearGradient(0,0,0,H);
+    sky.addColorStop(0,'#6fa8cf');sky.addColorStop(0.75,'#a8cbe4');sky.addColorStop(1,'#cfe3ef');
+    ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='rgba(110,130,90,0.55)';
+    ctx.beginPath();ctx.moveTo(0,GROUND_Y);ctx.lineTo(0,GROUND_Y-70);ctx.quadraticCurveTo(320,GROUND_Y-130,640,GROUND_Y-70);
+    ctx.quadraticCurveTo(960,GROUND_Y-20,1280,GROUND_Y-80);ctx.lineTo(1280,GROUND_Y);ctx.closePath();ctx.fill();
+  }
+  // Ground surface: textured dirt with a grass top line, drawn over the
+  // background's bottom strip so the physics ground reads exactly at GROUND_Y.
+  var gg=ctx.createLinearGradient(0,GROUND_Y,0,H);
+  gg.addColorStop(0,'#5d8a3c');gg.addColorStop(0.18,'#7a5a30');gg.addColorStop(1,'#543d20');
+  ctx.fillStyle=gg;ctx.fillRect(0,GROUND_Y,W,H-GROUND_Y);
+  ctx.fillStyle='#6da34a';ctx.fillRect(0,GROUND_Y,W,5);
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  for(var gx=0;gx<W;gx+=46){ctx.fillRect((gx*7)%W,GROUND_Y+14+((gx*13)%18),8,3);}
+  // Soft shadows under every moving body, pooled on the ground.
+  var bodies=M.Composite.allBodies(world);
+  for(var i=0;i<bodies.length;i++){
+    var b=bodies[i];if(b.isStatic)continue;
+    var bw=Math.max(10,b.bounds.max.x-b.bounds.min.x);
+    var hgt=Math.max(0,GROUND_Y-b.position.y);
+    var a=Math.max(0.04,0.22-hgt*0.00035);
+    ctx.fillStyle='rgba(20,25,15,'+a+')';
+    ctx.beginPath();ctx.ellipse(b.position.x,GROUND_Y+7,bw*0.55,4.5,0,0,7);ctx.fill();
+  }
+  drawSlingshot();
+  for(var j=0;j<bodies.length;j++){
+    var bb=bodies[j];
+    if(bb.label==='wall'||bb.label==='ground')continue;
+    if(bb.label==='pumpkin'){drawPumpkin(bb);continue;}
+    drawBody(bb);
+  }
+  drawSlingshotFront();
+  // Floating score popups: rise and fade over ~950 ms.
+  var pnow=performance.now();
+  juice.popups=juice.popups.filter(function(p){return pnow-p.born<950;});
+  for(var pi=0;pi<juice.popups.length;pi++){
+    var pp=juice.popups[pi],age=pnow-pp.born;
+    ctx.save();ctx.globalAlpha=Math.max(0,1-age/950);
+    ctx.font='bold 17px sans-serif';ctx.textAlign='center';
+    ctx.lineWidth=3;ctx.strokeStyle='rgba(20,15,5,0.75)';
+    var py=pp.y-age*0.045;
+    ctx.strokeText(pp.text,pp.x,py);ctx.fillStyle='#ffe14d';ctx.fillText(pp.text,pp.x,py);
+    ctx.restore();
+  }
+  if(dragging){ctx.fillStyle='rgba(255,255,255,0.85)';ctx.strokeStyle='rgba(20,20,20,0.35)';
+    for(var t=0.12;t<1;t+=0.12){var px=ANCHOR.x+(ANCHOR.x-chest.position.x)*t,py=ANCHOR.y+(ANCHOR.y-chest.position.y)*t;
+      ctx.beginPath();ctx.arc(px,py,3,0,7);ctx.fill();ctx.stroke();}}
+}
+requestAnimationFrame(frame);
+})();

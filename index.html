@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dummy Drop</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+  <div id="hud"><span id="hud-title">Dummy Drop</span><span id="hud-info">Drag the dummy back and release</span></div>
+  <div id="level-select"><span>Level:</span><button class="lvl-btn" id="btn-lvl-1" data-level="1">1 - House</button><button class="lvl-btn" id="btn-lvl-2" data-level="2">2 - Fort</button><button class="lvl-btn" id="btn-lvl-3" data-level="3">3 - Keep</button><button class="lvl-btn" id="btn-lvl-4" data-level="4">4 - Bridge</button></div>
+  <canvas id="game" width="1280" height="720"></canvas>
+  <div id="overlay" style="display:none"><h2 id="overlay-title"></h2><p id="overlay-text"></p><button id="btn-retry">Retry level</button><button id="btn-next">Next level</button></div>
+</div>
+<script src="matter.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

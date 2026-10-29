@@ -1,0 +1,11 @@
+html,body{margin:0;padding:0;background:#1b2430;color:#eef;font-family:Arial,sans-serif}
+#wrap{width:1280px;margin:0 auto;position:relative}
+#hud{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 4px;font-size:15px;box-sizing:border-box;max-width:1280px}
+#hud-title{font-weight:bold;white-space:nowrap}
+#hud-info{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+#level-select{display:flex;gap:8px;align-items:center;padding:0 4px 8px;font-size:14px}
+.lvl-btn{padding:6px 12px;font-size:14px;cursor:pointer;background:#2a3648;color:#eef;border:1px solid #8899aa;border-radius:6px}
+.lvl-btn.active{background:#f2c018;color:#111;border-color:#f2c018;font-weight:bold}
+#game{background:#87b5d6;display:block;border:2px solid #000;touch-action:none}
+#overlay{position:absolute;left:50%;top:300px;transform:translateX(-50%);background:rgba(20,26,36,0.92);border:2px solid #eef;border-radius:10px;padding:18px 26px;text-align:center;z-index:5}
+#overlay h2{margin:0 0 8px}#overlay button{margin:4px;padding:8px 16px;font-size:15px;cursor:pointer}
